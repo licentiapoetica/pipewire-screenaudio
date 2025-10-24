@@ -1,4 +1,4 @@
-use std::{process::Command, rc::Rc, str, thread, time::Duration};
+use std::{process::Command, cell::RefCell, thread, time::Duration};
 
 extern crate serde_json;
 use serde_json::{json, Deserializer, Map, Value};
@@ -8,19 +8,14 @@ use log::debug;
 
 use crate::helpers::JsonGetters;
 
-static mut DUMP_CACHE: Option<Rc<Vec<Value>>> = None;
-fn get_dump_cache() -> Option<&'static Vec<Value>> {
-  unsafe {
-    match &DUMP_CACHE {
-      None => None,
-      Some(v) => Some(v),
-    }
-  }
+thread_local! {
+  static DUMP_CACHE: RefCell<Option<Vec<Value>>> = RefCell::new(None);
 }
 
-fn get_pw_dump(invalidate_cache: bool) -> &'static [Value] {
-  if !invalidate_cache && unsafe { DUMP_CACHE.is_some() } {
-    return get_dump_cache().unwrap();
+fn get_pw_dump(invalidate_cache: bool) -> Vec<Value> {
+  let dump_cache = DUMP_CACHE.with_borrow(|x| x.clone());
+  if !invalidate_cache && dump_cache.is_some() {
+    return dump_cache.unwrap();
   }
 
   let dump_buffer = Command::new("pw-dump")
@@ -31,15 +26,13 @@ fn get_pw_dump(invalidate_cache: bool) -> &'static [Value] {
   let dump_string = str::from_utf8(&dump_buffer).unwrap();
 
   // In case `pw-dump` returns multiple arrays (#15), only keep the first one
-  let mut stream = Deserializer::from_str(dump_string).into_iter::<Value>();
+  let stream = Deserializer::from_str(dump_string).into_iter::<Value>();
   let dump: Value = stream.filter(|batch| ! batch.as_ref().unwrap()[0]["info"].is_null()).next().unwrap().unwrap();
 
   let result = dump.as_array().unwrap().iter().map(|node| node.clone()).collect::<Vec<_>>();
 
-  let ptr = Rc::new(result);
-  unsafe { DUMP_CACHE = Some(ptr); };
-
-  get_dump_cache().unwrap()
+  DUMP_CACHE.with_borrow_mut(|cache| *cache = Some(result.clone()));
+  result
 }
 
 fn get_node_media_class(node: &Value) -> Result<String,String> {
@@ -84,7 +77,7 @@ pub fn get_node_id_from_serial(serial: i64) -> Option<i64> {
       Ok(v) => v == serial,
     });
 
-  if (result.is_some()) {
+  if result.is_some() {
     eprintln!("Found Target: {}", result.to_owned().unwrap());
   }
 
